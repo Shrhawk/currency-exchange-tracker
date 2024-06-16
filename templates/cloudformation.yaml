@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  CodeS3BucketName:
+    Type: String
+    Description: "The name of the S3 bucket containing Lambda code"
+
+Resources:
+  ExchangeRatesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ExchangeRates
+      AttributeDefinitions:
+        - AttributeName: Currency
+          AttributeType: S
+        - AttributeName: Timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Currency
+          KeyType: HASH
+        - AttributeName: Timestamp
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - IndexName: TimestampIndex
+          KeySchema:
+            - AttributeName: Timestamp
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  FetchExchangeRatesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: fetch_exchange_rates.fetch_exchange_rates
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeS3BucketName
+        S3Key: fetch_exchange_rates.zip
+      Runtime: python3.10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ExchangeRatesTable
+      Layers:
+        - !Ref RequestsLayer
+        - !Ref XmlLayer
+
+  GetExchangeRatesFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: get_exchange_rates.get_exchange_rates
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref CodeS3BucketName
+        S3Key: get_exchange_rates.zip
+      Runtime: python3.10
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ExchangeRatesTable
+      Layers:
+        - !Ref RequestsLayer
+        - !Ref XmlLayer
+
+  FetchExchangeRatesSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: 'cron(0 0 * * ? *)'
+      Targets:
+        - Arn: !GetAtt FetchExchangeRatesFunction.Arn
+          Id: FetchExchangeRatesFunctionTarget
+
+  FetchExchangeRatesFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt FetchExchangeRatesFunction.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: 'events.amazonaws.com'
+      SourceArn: !GetAtt FetchExchangeRatesSchedule.Arn
+
+  GetExchangeRatesApiGatewayPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt GetExchangeRatesFunction.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: 'apigateway.amazonaws.com'
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGateway}/*/GET/rates"
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaDynamoDBPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                Resource: '*'
+        - PolicyName: LambdaBasicExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "arn:aws:logs:*:*:*"
+
+  RequestsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: RequestsLayer
+      Content:
+        S3Bucket: !Ref CodeS3BucketName
+        S3Key: requests_layer.zip
+      CompatibleRuntimes:
+        - python3.10
+
+  XmlLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: XmlLayer
+      Content:
+        S3Bucket: !Ref CodeS3BucketName
+        S3Key: xml_layer.zip
+      CompatibleRuntimes:
+        - python3.10
+
+  APIGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: ExchangeRatesAPI
+
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref APIGateway
+      ParentId: !GetAtt APIGateway.RootResourceId
+      PathPart: rates
+
+  GetExchangeRatesMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref APIGateway
+      ResourceId: !Ref ApiGatewayResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub
+          - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+          - LambdaArn: !GetAtt GetExchangeRatesFunction.Arn
+        PassthroughBehavior: WHEN_NO_MATCH
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseTemplates:
+              application/json: ""
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: Empty
+
+  ApiGatewayDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn: [GetExchangeRatesMethod]
+    Properties:
+      RestApiId: !Ref APIGateway
+      StageName: prod
+
+Outputs:
+  ApiGatewayUrl:
+    Description: "API Gateway URL"
+    Value: !Sub "https://${APIGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/rates"
+  RequestsLayer:
+    Description: "ARN of the Requests Layer"
+    Value: !Ref RequestsLayer
+  XmlLayer:
+    Description: "ARN of the XML Layer"
+    Value: !Ref XmlLayer

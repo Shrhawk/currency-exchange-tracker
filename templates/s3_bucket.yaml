@@ -1,0 +1,10 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  CodeS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: currency-exchange-tracker-code-bucket
+Outputs:
+  CodeS3BucketName:
+    Description: "The name of the S3 bucket created"
+    Value: !Ref CodeS3Bucket

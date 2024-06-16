@@ -1,0 +1,5 @@
+# -*- coding: utf-8 -*-
+# This file is protected via CODEOWNERS
+from __future__ import annotations
+
+__version__ = "2.2.1"
